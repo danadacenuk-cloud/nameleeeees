@@ -3,91 +3,88 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Голосовий Термінал</title>
+    <title>Голосовий Термінал V2</title>
     <style>
-        body { background-color: black; color: #00FF00; font-family: monospace; padding: 20px; }
-        #status { color: yellow; font-weight: bold; font-size: 1.2em; margin-bottom: 15px; }
-        .log { margin: 5px 0; }
+        body { background-color: black; color: #00FF00; font-family: monospace; padding: 20px; text-align: center; }
+        #status { color: yellow; font-weight: bold; font-size: 1.4em; margin-bottom: 20px; }
+        #btn { background: #00FF00; color: black; border: none; padding: 15px 30px; font-size: 1.2em; font-family: monospace; cursor: pointer; font-weight: bold; }
+        #console { text-align: left; margin-top: 20px; max-height: 300px; overflow-y: auto; }
+        .log { margin: 5px 0; color: #00FF00; }
         .error { color: red; }
-        .success { color: #00FF00; }
     </style>
 </head>
 <body>
-    <div id="status">Запуск мікрофона... Натисніть на екран, якщо не увімкнувся.</div>
+    <div id="status">Натисніть кнопку для запуску запису</div>
+    <button id="btn" onclick="startAudioSystem()">УВІМКНУТИ МІКРОФОН</button>
     <div id="console"></div>
 
     <script>
         const laptopIp = '100.72.222.179'; 
         const port = '6752';
-
+        
+        let mediaRecorder;
+        let audioChunks = [];
         const statusDiv = document.getElementById('status');
         const consoleDiv = document.getElementById('console');
 
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        
-        if (!SpeechRecognition) {
-            log('Браузер не підтримує розпізнавання мови.', true);
-        } else {
-            var recognition = new SpeechRecognition();
-            recognition.continuous = false;
-            recognition.interimResults = false;
-            recognition.lang = 'ru-RU'; 
+        async function startAudioSystem() {
+            document.getElementById('btn').style.display = 'none';
+            statusDiv.innerText = "Запитую доступ до мікрофона...";
 
-            recognition.onstart = () => { statusDiv.innerText = "Мікрофон активний. Слухаю команду..."; };
-            
-            recognition.onerror = (event) => { 
-                if (event.error === 'not-allowed') {
-                    statusDiv.innerText = "Надайте дозвіл на мікрофон у налаштуваннях браузера!";
-                } else {
-                    log('Помилка мікрофона: ' + event.error, true); 
-                }
-            };
-            
-            recognition.onend = () => { 
-                setTimeout(() => { try { recognition.start(); } catch(e) {} }, 400); 
-            };
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                statusDiv.innerText = "Мікрофон успішно увімкнено! Слухаю постійно...";
+                
+                // Налаштовуємо постійний запис звуку шматочками
+                mediaRecorder = new MediaRecorder(stream);
+                
+                mediaRecorder.ondataavailable = event => {
+                    if (event.data.size > 0) {
+                        sendAudioToServer(event.data);
+                    }
+                };
 
-            recognition.onresult = (event) => {
-                const resultIndex = event.resultIndex;
-                const text = event.results[resultIndex][0].transcript.trim();
-                sendToServer(text);
-            };
-            
-            window.onload = () => { try { recognition.start(); } catch(e) {} };
-            document.body.onclick = () => { try { recognition.start(); } catch(e) {} };
+                // Кожні 4 секунди завершуємо шматок і автоматом починаємо новий без переривання мікрофона
+                setInterval(() => {
+                    if (mediaRecorder.state === "recording") {
+                        mediaRecorder.stop();
+                        mediaRecorder.start();
+                    }
+                }, 4000);
+
+                mediaRecorder.start();
+
+            } catch (err) {
+                statusDiv.innerText = "Помилка доступу до мікрофона: " + err.message;
+            }
         }
 
-        function log(message, isError = false, isSuccess = false) {
-            const p = document.createElement('p');
-            if (isError) p.className = 'log error';
-            else if (isSuccess) p.className = 'log success';
-            else p.className = 'log';
-            p.innerText = message;
-            consoleDiv.appendChild(p);
-            window.scrollTo(0, document.body.scrollHeight);
-        }
-
-        function sendToServer(speechText) {
-            // Використовуємо http для локального IP комп'ютера
-            const url = `http://${laptopIp}:${port}/`;
-            const formData = new URLSearchParams();
-            formData.append('text', speechText);
+        function sendAudioToServer(audioBlob) {
+            const url = `http://${laptopIp}:${port}/audio`;
+            const formData = new FormData();
+            formData.append('audio', audioBlob, 'voice.wav');
 
             fetch(url, {
                 method: 'POST',
-                mode: 'cors', // Дозволяємо крос-доменні запити
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: formData.toString()
+                mode: 'cors',
+                body: formData
             })
-            .then(response => response.text())
-            .then(data => {
-                if (data === 'OK') {
-                    log('[Команда виконана]: ' + speechText, false, true);
+            .then(res => res.text())
+            .then(text => {
+                if(text && text !== "IGNORED" && text !== "ERROR") {
+                    log("[Команда на ПК]: " + text);
                 }
             })
-            .catch(error => {
-                log('Помилка відправки на ПК. Перевірте, чи запущено server.py', true);
+            .catch(err => {
+                log("Зв'язок з ПК заблоковано браузером. Потрібно налаштувати CORS.", true);
             });
+        }
+
+        function log(msg, isError = false) {
+            const p = document.createElement('p');
+            p.className = isError ? 'log error' : 'log';
+            p.innerText = msg;
+            consoleDiv.appendChild(p);
         }
     </script>
 </body>
