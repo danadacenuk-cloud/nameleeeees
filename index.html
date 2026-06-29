@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Голосовий Термінал V2</title>
+    <title>Голосовий Термінал V3</title>
     <style>
         body { background-color: black; color: #00FF00; font-family: monospace; padding: 20px; text-align: center; }
         #status { color: yellow; font-weight: bold; font-size: 1.4em; margin-bottom: 20px; }
@@ -15,68 +15,76 @@
 </head>
 <body>
     <div id="status">Натисніть кнопку для запуску запису</div>
-    <button id="btn" onclick="startAudioSystem()">УВІМКНУТИ МІКРОФОН</button>
+    <button id="btn" onclick="startContinuousAudio()">УВІМКНУТИ МІКРОФОН</button>
     <div id="console"></div>
 
     <script>
         const laptopIp = '100.72.222.179'; 
         const port = '6752';
         
-        let mediaRecorder;
-        let audioChunks = [];
+        let audioContext;
+        let processor;
+        let globalStream;
+        let audioBuffer = [];
         const statusDiv = document.getElementById('status');
         const consoleDiv = document.getElementById('console');
 
-        async function startAudioSystem() {
+        async function startContinuousAudio() {
             document.getElementById('btn').style.display = 'none';
-            statusDiv.innerText = "Запитую доступ до мікрофона...";
+            statusDiv.innerText = "Запитую мікрофон...";
 
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                statusDiv.innerText = "Мікрофон успішно увімкнено! Слухаю постійно...";
+                globalStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                statusDiv.innerText = "МІКРОФОН ПРАЦЮЄ БЕЗЗУПИННО. Говоріть...";
+
+                // Створюємо аудіо-контекст для прямого зняття звуку з плати без стоп-команд
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                const source = audioContext.createMediaStreamSource(globalStream);
                 
-                // Налаштовуємо постійний запис звуку шматочками
-                mediaRecorder = new MediaRecorder(stream);
-                
-                mediaRecorder.ondataavailable = event => {
-                    if (event.data.size > 0) {
-                        sendAudioToServer(event.data);
-                    }
+                // Створюємо процесор, який збирає шматочки звуку кожні 4096 фреймів
+                processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+
+                processor.onaudioprocess = function(e) {
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    // Копіюємо звук у наш масив
+                    audioBuffer.push(new Float32Array(inputData));
                 };
 
-                // Кожні 4 секунди завершуємо шматок і автоматом починаємо новий без переривання мікрофона
+                # Кожні 4 секунди забираємо накопичений звук і шлемо на ПК, мікрофон при цьому взагалі НЕ вимикається
                 setInterval(() => {
-                    if (mediaRecorder.state === "recording") {
-                        mediaRecorder.stop();
-                        mediaRecorder.start();
+                    if (audioBuffer.length > 0) {
+                        const blob = convertBufferToWav(audioBuffer, 16000);
+                        audioBuffer = []; // Очищуємо для наступної порції
+                        sendAudioBytes(blob);
                     }
                 }, 4000);
 
-                mediaRecorder.start();
-
             } catch (err) {
-                statusDiv.innerText = "Помилка доступу до мікрофона: " + err.message;
+                statusDiv.innerText = "Помилка мікрофона: " + err.message;
             }
         }
 
-        function sendAudioToServer(audioBlob) {
+        function sendAudioBytes(blob) {
             const url = `http://${laptopIp}:${port}/audio`;
-            const formData = new FormData();
-            formData.append('audio', audioBlob, 'voice.wav');
-
+            
+            // Відправляємо як чистий бінарний потік, щоб обійти тупі блокування форм
             fetch(url, {
                 method: 'POST',
                 mode: 'cors',
-                body: formData
+                headers: { 'Content-Type': 'application/octet-stream' },
+                body: blob
             })
             .then(res => res.text())
             .then(text => {
                 if(text && text !== "IGNORED" && text !== "ERROR") {
-                    log("[Команда на ПК]: " + text);
+                    log("[Команда виконана]: " + text);
                 }
             })
             .catch(err => {
-                log("Зв'язок з ПК заблоковано браузером. Потрібно налаштувати CORS.", true);
+                log("ПК не відповів. Переконайся, що server.py запущений!", true);
             });
         }
 
@@ -85,6 +93,42 @@
             p.className = isError ? 'log error' : 'log';
             p.innerText = msg;
             consoleDiv.appendChild(p);
+        }
+
+        // Функція зборки WAV файлу на льоту
+        function convertBufferToWav(chunks, sampleRate) {
+            let totalLength = 0;
+            for (let chunk of chunks) { totalLength += chunk.length; }
+            let result = new Float32Array(totalLength);
+            let offset = 0;
+            for (let chunk of chunks) {
+                result.set(chunk, offset);
+                offset += chunk.length;
+            }
+            let buffer = new ArrayBuffer(44 + result.length * 2);
+            let view = new DataView(buffer);
+            function writeString(sOffset, string) {
+                for (let i = 0; i < string.length; i++) { view.setUint8(sOffset + i, string.charCodeAt(i)); }
+            }
+            writeString(0, 'RIFF');
+            view.setUint32(4, 36 + result.length * 2, true);
+            writeString(8, 'WAVE');
+            writeString(12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);
+            view.setUint16(22, 1, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * 2, true);
+            view.setUint16(32, 2, true);
+            view.setUint16(34, 16, true);
+            writeString(36, 'data');
+            view.setUint32(40, result.length * 2, true);
+            let index = 44;
+            for (let i = 0; i < result.length; i++, index += 2) {
+                let s = Math.max(-1, Math.min(1, result[i]));
+                view.setInt16(index, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+            }
+            return new Blob([view], { type: 'audio/wav' });
         }
     </script>
 </body>
