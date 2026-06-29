@@ -13,7 +13,7 @@
     </style>
 </head>
 <body>
-    <div id="status">Мікрофон активний. Говорите...</div>
+    <div id="status">Запуск мікрофона... Натисніть на екран, якщо не увімкнувся.</div>
     <div id="console"></div>
 
     <script>
@@ -29,17 +29,22 @@
             log('Браузер не підтримує розпізнавання мови.', true);
         } else {
             var recognition = new SpeechRecognition();
-            // Вмикаємо постійний режим, щоб мікрофон не вирубався після кожного слова
-            recognition.continuous = true;
+            recognition.continuous = false;
             recognition.interimResults = false;
             recognition.lang = 'ru-RU'; 
 
-            recognition.onstart = () => { statusDiv.innerText = "Мікрофон працює стабільно. Слухаю..."; };
-            recognition.onerror = (event) => { log('Помилка мікрофона: ' + event.error, true); };
+            recognition.onstart = () => { statusDiv.innerText = "Мікрофон активний. Слухаю команду..."; };
             
-            // Прибираємо скажений автоперезапуск onend, тепер він перезапуститься тільки якщо реально впав
+            recognition.onerror = (event) => { 
+                if (event.error === 'not-allowed') {
+                    statusDiv.innerText = "Надайте дозвіл на мікрофон у налаштуваннях браузера!";
+                } else {
+                    log('Помилка мікрофона: ' + event.error, true); 
+                }
+            };
+            
             recognition.onend = () => { 
-                setTimeout(() => { try { recognition.start(); } catch(e){} }, 1000); 
+                setTimeout(() => { try { recognition.start(); } catch(e) {} }, 400); 
             };
 
             recognition.onresult = (event) => {
@@ -48,7 +53,8 @@
                 sendToServer(text);
             };
             
-            try { recognition.start(); } catch(e){}
+            window.onload = () => { try { recognition.start(); } catch(e) {} };
+            document.body.onclick = () => { try { recognition.start(); } catch(e) {} };
         }
 
         function log(message, isError = false, isSuccess = false) {
@@ -62,24 +68,25 @@
         }
 
         function sendToServer(speechText) {
+            // Використовуємо http для локального IP комп'ютера
             const url = `http://${laptopIp}:${port}/`;
             const formData = new URLSearchParams();
             formData.append('text', speechText);
 
             fetch(url, {
                 method: 'POST',
+                mode: 'cors', // Дозволяємо крос-доменні запити
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                 body: formData.toString()
             })
             .then(response => response.text())
             .then(data => {
                 if (data === 'OK') {
-                    log('[Команда]: ' + speechText, false, true);
+                    log('[Команда виконана]: ' + speechText, false, true);
                 }
             })
             .catch(error => {
-                // Виводимо ТІЛЬКИ чисту системну помилку, без моєї відсебеньки про IP
-                log('Системна помилка: ' + error.message, true);
+                log('Помилка відправки на ПК. Перевірте, чи запущено server.py', true);
             });
         }
     </script>
